@@ -49,6 +49,17 @@ BEHAVIORAL_CAPACITY     = 25
 NOTES_CAPACITY          = 20
 ARCHIVE_TOP_N           = 6    # Important entries shown in archive summary
 
+# Spaced Repetition System (SRS) constants
+REINFORCE_BOOST_PER_COUNT = 0.6  # Effective ★ added per reinforcement (cap: +2.4)
+REINFORCE_MAX_BOOST       = 2.4
+VALENCE_TRANSITION_BOOST  = 1.0  # Emotion-change marker "→" in raw
+VALENCE_NEGATIVE_BOOST    = 0.5  # Negative / high-arousal emoji in raw
+PRIMACY_SESSION_CUTOFF    = 2    # Sessions ≤ this are "early" and get primacy boost
+PRIMACY_BOOST             = 1.0
+RECENCY_PROTECTED         = 5    # Most-recent N hot entries immune to auto-archive
+# Negative-valence emoji set (Baumeister negativity bias)
+NEGATIVE_EMOTIONS = frozenset("😢😤💢🥺😭😰😣😖😫😔😞")
+
 BLANK_MEMORY: dict = {
     "user_id": "default",
     "session": 0,
@@ -175,14 +186,21 @@ def build_archive_summary(archive_entries: list[dict], relationship_arc: list[di
         return ""
     lines = []
     if archive_entries:
-        # Top entries by importance descending
-        top = sorted(archive_entries, key=lambda e: -e.get("importance", 3))[:ARCHIVE_TOP_N]
+        # Flashbulb entries always shown first (never let them disappear from summary)
+        flashbulb = [e for e in archive_entries if e.get("flashbulb")]
+        rest      = [e for e in archive_entries if not e.get("flashbulb")]
+        # Remaining slots filled by highest effective_importance
+        rest_top  = sorted(rest, key=lambda e: -e.get("importance", 3))[:max(0, ARCHIVE_TOP_N - len(flashbulb))]
+        top       = flashbulb + rest_top
         lines.append(f"归档记忆 {len(archive_entries)} 条。重要事件：")
         for e in top:
-            sess = e.get("archived_session", "?")
-            raw = e.get("raw", "").split("|")[-1].strip()[:40]
-            imp = "★" * e.get("importance", 3)
-            lines.append(f"  {imp} [S{sess}] {raw}")
+            sess  = e.get("archived_session", "?")
+            raw   = e.get("raw", "").split("|")[-1].strip()[:40]
+            imp   = "★" * e.get("importance", 3)
+            fb    = " [⚡]" if e.get("flashbulb") else ""
+            rc    = e.get("reinforcement_count", 0)
+            srs   = f" ×{rc}" if rc > 0 else ""
+            lines.append(f"  {imp}{fb}{srs} [S{sess}] {raw}")
     if relationship_arc and len(relationship_arc) >= 2:
         # Sample up to 5 arc points evenly
         arc = relationship_arc
@@ -213,6 +231,54 @@ def track_relationship(memory: dict) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Spaced Repetition System — effective importance
+# ---------------------------------------------------------------------------
+
+def emotional_valence_boost(raw: str) -> float:
+    """
+    Automatically score emotional intensity from raw text (Baumeister 2001,
+    Cahill & McGaugh 1995). Two signals:
+      • Emotion-change arrow "→"  →  +VALENCE_TRANSITION_BOOST (high arousal)
+      • Negative-valence emoji    →  +VALENCE_NEGATIVE_BOOST   (negativity bias)
+    Combined, negative turning-point memories can earn up to +1.5 over base ★.
+    """
+    boost = 0.0
+    if "→" in raw:
+        boost += VALENCE_TRANSITION_BOOST
+    if any(ch in raw for ch in NEGATIVE_EMOTIONS):
+        boost += VALENCE_NEGATIVE_BOOST
+    return boost
+
+
+def effective_importance(entry: dict, current_session: int) -> float:
+    """
+    Compute the true archival priority of an episodic entry.
+
+    Components (all additive on top of the author-assigned ★ base):
+    ① Spaced-repetition boost   — each <reinforce> adds REINFORCE_BOOST_PER_COUNT,
+                                   capped at REINFORCE_MAX_BOOST.  (Ebbinghaus 1885)
+    ② Emotional valence boost   — auto-scored from emoji; transitions and negative
+                                   emotions decay slower.  (Baumeister 2001)
+    ③ Primacy boost             — entries born in the first PRIMACY_SESSION_CUTOFF
+                                   sessions get +PRIMACY_BOOST.  (Atkinson & Shiffrin 1968)
+
+    Flashbulb entries return ∞ (99) — they are indestructible.
+    """
+    if entry.get("flashbulb"):
+        return 99.0
+    base = float(entry.get("importance", 3))
+    # ① SRS boost
+    rc = entry.get("reinforcement_count", 0)
+    srs = min(rc * REINFORCE_BOOST_PER_COUNT, REINFORCE_MAX_BOOST)
+    # ② Valence
+    valence = emotional_valence_boost(entry.get("raw", ""))
+    # ③ Primacy (only if first_session was recorded at creation time)
+    fs = entry.get("first_session")
+    primacy = PRIMACY_BOOST if (fs is not None and fs <= PRIMACY_SESSION_CUTOFF) else 0.0
+    return base + srs + valence + primacy
+
+
+# ---------------------------------------------------------------------------
 # Parsing helpers
 # ---------------------------------------------------------------------------
 
@@ -223,22 +289,20 @@ def parse_importance(text: str) -> int:
 def parse_episodic_entry(raw: str) -> dict:
     raw = raw.strip()
     m = re.match(r"(#e\d+)\s+((?:★|☆)+)\s+(.+?)\s+(.+?)\s*\|\s*(.+)", raw)
-    if m:
-        return {
-            "id": m.group(1).lstrip("#"),
-            "raw": raw,
-            "importance": parse_importance(m.group(2)),
-            "suppressed": "[已压制]" in raw,
-            "fuzzy": "[模糊]" in raw,
-        }
-    id_m = re.match(r"#(e\d+)", raw)
-    return {
-        "id": id_m.group(1) if id_m else "e??",
-        "raw": raw,
-        "importance": 3,
-        "suppressed": "[已压制]" in raw,
-        "fuzzy": "[模糊]" in raw,
+    base = {
+        # SRS fields — preserved across updates (caller must merge into existing)
+        "reinforcement_count":    0,
+        "last_reinforced_session": None,
+        "first_session":          None,   # Set to current session at creation time
+        "flashbulb":              "[⚡]" in raw,
+        "suppressed":             "[已压制]" in raw,
+        "fuzzy":                  "[模糊]" in raw,
     }
+    if m:
+        return {**base, "id": m.group(1).lstrip("#"), "raw": raw,
+                "importance": parse_importance(m.group(2))}
+    id_m = re.match(r"#(e\d+)", raw)
+    return {**base, "id": id_m.group(1) if id_m else "e??", "raw": raw, "importance": 3}
 
 
 def parse_behavioral_entry(raw: str) -> dict:
@@ -279,15 +343,25 @@ def parse_mem_ops(text: str) -> list[dict]:
             r'<suppress\s+target="([^"]+)"\s+id="([^"]+)">(.*?)</suppress>', block, re.DOTALL
         ):
             ops.append({"op": "suppress", "target": target.strip(), "id": id_.strip(), "reason": reason.strip()})
-        # New: <note> — permanent fact
+        # <note> — permanent fact
         for content in re.findall(r"<note>(.*?)</note>", block, re.DOTALL):
             ops.append({"op": "note", "content": content.strip()})
-        # New: <merge ids="e03,e07"> — merge episodes into one
+        # <merge ids="e03,e07"> — merge episodes into one
         for ids_str, content in re.findall(
             r'<merge\s+ids="([^"]+)">(.*?)</merge>', block, re.DOTALL
         ):
             ids = [i.strip().lstrip("#") for i in ids_str.split(",")]
             ops.append({"op": "merge", "ids": ids, "content": content.strip()})
+        # SRS: <reinforce id="eNN"/> or <reinforce id="eNN">reinterpretation</reinforce>
+        for id_, note in re.findall(
+            r'<reinforce\s+id="([^"]+)">(.*?)</reinforce>', block, re.DOTALL
+        ):
+            ops.append({"op": "reinforce", "id": id_.strip().lstrip("#"), "note": note.strip()})
+        for id_ in re.findall(r'<reinforce\s+id="([^"]+)"\s*/>', block):
+            ops.append({"op": "reinforce", "id": id_.strip().lstrip("#"), "note": ""})
+        # SRS: <flashbulb id="eNN"/> — mark as indestructible
+        for id_ in re.findall(r'<flashbulb\s+id="([^"]+)"\s*/?>', block):
+            ops.append({"op": "flashbulb", "id": id_.strip().lstrip("#")})
     return ops
 
 
@@ -355,22 +429,35 @@ def _archive_entries(d: Path, user_id: str, memory: dict, entries: list[dict]) -
 
 
 def auto_consolidate(d: Path, user_id: str, memory: dict) -> int:
-    """Archive fuzzy entries when hot tier exceeds threshold. Returns count archived."""
+    """
+    Archive fuzzy entries when hot tier exceeds threshold.
+    SRS rules applied:
+      • Flashbulb entries ([⚡]) are NEVER archived automatically
+      • Most-recent RECENCY_PROTECTED entries are immune to auto-archive
+      • Archival priority uses effective_importance (not raw ★)
+    Returns count archived.
+    """
     ep: list[dict] = memory.get("modules", {}).get("episodic_memory", [])
     if len(ep) <= EPISODIC_ARCHIVE_THRESH:
         return 0
-    fuzzy = [e for e in ep if e.get("fuzzy")]
-    if not fuzzy:
-        # Safety valve: archive lowest-importance entries if still over hard cap
-        if len(ep) > EPISODIC_HOT_CAPACITY:
-            ep_sorted = sorted(ep, key=lambda e: e.get("importance", 3))
-            overflow = len(ep) - EPISODIC_HOT_CAPACITY
-            fuzzy = ep_sorted[:overflow]
-    if fuzzy:
-        fuzzy_ids = {e["id"] for e in fuzzy}
-        memory["modules"]["episodic_memory"] = [e for e in ep if e["id"] not in fuzzy_ids]
-        _archive_entries(d, user_id, memory, fuzzy)
-    return len(fuzzy)
+    session = memory.get("session", 0)
+    recent_ids   = {e["id"] for e in ep[-RECENCY_PROTECTED:]}
+    protected_ids = recent_ids | {e["id"] for e in ep if e.get("flashbulb")}
+
+    # Fuzzy candidates (explicitly faded) — exclude protected
+    candidates = [e for e in ep if e.get("fuzzy") and e["id"] not in protected_ids]
+    if not candidates and len(ep) > EPISODIC_HOT_CAPACITY:
+        # Safety valve: pick lowest-effective-importance non-protected entries
+        sortable   = [e for e in ep if e["id"] not in protected_ids]
+        sortable.sort(key=lambda e: effective_importance(e, session))
+        overflow   = len(ep) - EPISODIC_HOT_CAPACITY
+        candidates = sortable[:overflow]
+
+    if candidates:
+        evict_ids = {e["id"] for e in candidates}
+        memory["modules"]["episodic_memory"] = [e for e in ep if e["id"] not in evict_ids]
+        _archive_entries(d, user_id, memory, candidates)
+    return len(candidates)
 
 
 def apply_ops(d: Path, user_id: str, memory: dict, ops: list[dict]) -> dict:
@@ -394,14 +481,21 @@ def apply_ops(d: Path, user_id: str, memory: dict, ops: list[dict]) -> dict:
                     entry = parse_episodic_entry(line)
                     existing = next((e for e in entries if e["id"] == entry["id"]), None)
                     if existing and o == "update":
+                        # Preserve SRS history across updates
+                        entry["reinforcement_count"]    = existing.get("reinforcement_count", 0)
+                        entry["last_reinforced_session"] = existing.get("last_reinforced_session")
+                        entry["first_session"]          = existing.get("first_session", session)
                         existing.update(entry)
                     else:
+                        entry["first_session"] = session   # Primacy: record birth session
                         entries.append(entry)
-                # Hard cap enforcement (archive, not delete)
+                # Hard cap enforcement — use effective_importance, respect recency
                 if len(entries) > EPISODIC_HOT_CAPACITY:
-                    to_evict = sorted(entries, key=lambda e: e.get("importance", 3))
-                    evict = to_evict[:len(entries) - EPISODIC_HOT_CAPACITY]
-                    evict_ids = {e["id"] for e in evict}
+                    recent_ids = {e["id"] for e in entries[-RECENCY_PROTECTED:]}
+                    sortable   = [e for e in entries if e["id"] not in recent_ids]
+                    sortable.sort(key=lambda e: effective_importance(e, session))
+                    evict      = sortable[:len(entries) - EPISODIC_HOT_CAPACITY]
+                    evict_ids  = {e["id"] for e in evict}
                     modules["episodic_memory"] = [e for e in entries if e["id"] not in evict_ids]
                     _archive_entries(d, user_id, memory, evict)
 
@@ -488,6 +582,31 @@ def apply_ops(d: Path, user_id: str, memory: dict, ops: list[dict]) -> dict:
                         if "[已压制]" not in e["raw"]:
                             e["raw"] += " [已压制]"
                         break
+
+        # ── SRS: reinforce ───────────────────────────────────────────────
+        elif o == "reinforce":
+            rid = op["id"]
+            for e in modules.get("episodic_memory", []):
+                if e["id"] == rid:
+                    e["reinforcement_count"] = e.get("reinforcement_count", 0) + 1
+                    e["last_reinforced_session"] = session
+                    # Reconsolidation: optional reinterpretation note attached to raw
+                    if op.get("note"):
+                        marker = f" [S{session}重构: {op['note'][:40]}]"
+                        # Replace previous reconsolidation note if present
+                        e["raw"] = re.sub(r" \[S\d+重构:[^\]]+\]", "", e["raw"]) + marker
+                    break
+
+        # ── SRS: flashbulb ───────────────────────────────────────────────
+        elif o == "flashbulb":
+            fid = op["id"]
+            for e in modules.get("episodic_memory", []):
+                if e["id"] == fid:
+                    e["flashbulb"] = True
+                    if "[⚡]" not in e["raw"]:
+                        # Insert [⚡] after the ID field
+                        e["raw"] = re.sub(r"(#e\d+)", r"\1 [⚡]", e["raw"], count=1)
+                    break
 
     # Auto-consolidate fuzzy entries if above threshold
     auto_consolidate(d, user_id, memory)
@@ -627,15 +746,28 @@ def cmd_status(args: argparse.Namespace, d: Path) -> None:
     print(f"User           : {user_id}")
     print(f"Session        : {memory.get('session', 0)}")
     print(f"Last updated   : {(memory.get('last_updated') or 'never')[:19]}")
+    session = memory.get("session", 0)
     print(f"Episodic (hot) : {len(ep)}/{EPISODIC_HOT_CAPACITY}"
           f"  [suppressed={sum(1 for e in ep if e.get('suppressed'))}"
-          f"  fuzzy={sum(1 for e in ep if e.get('fuzzy'))}]")
+          f"  fuzzy={sum(1 for e in ep if e.get('fuzzy'))}"
+          f"  flashbulb={sum(1 for e in ep if e.get('flashbulb'))}]")
     if ep:
         dist: dict[int, int] = {}
         for e in ep:
             k = e.get("importance", 3)
             dist[k] = dist.get(k, 0) + 1
-        print("  ★-dist: " + "  ".join(f"{'★'*k}:{v}" for k, v in sorted(dist.items())))
+        print("  ★-dist : " + "  ".join(f"{'★'*k}:{v}" for k, v in sorted(dist.items())))
+        # SRS stats
+        reinforced = [(e["id"], e.get("reinforcement_count", 0))
+                      for e in ep if e.get("reinforcement_count", 0) > 0]
+        if reinforced:
+            reinforced.sort(key=lambda x: -x[1])
+            top3 = "  ".join(f"#{i}×{c}" for i, c in reinforced[:3])
+            print(f"  SRS top : {top3}")
+        eff_scores = [(e["id"], effective_importance(e, session)) for e in ep]
+        eff_scores.sort(key=lambda x: -x[1])
+        top3_eff = "  ".join(f"#{i}={s:.1f}" for i, s in eff_scores[:3])
+        print(f"  Eff.imp : {top3_eff}")
     print(f"Behavioral     : {len(bm)}/{BEHAVIORAL_CAPACITY}")
     print(f"Notes          : {len(notes)}/{NOTES_CAPACITY}")
     print(f"Archive        : {arch.get('entry_count', 0)} entries"
