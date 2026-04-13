@@ -10,7 +10,7 @@ description: |
   Use whenever: a persona needs to remember users across sessions, a user
   says "do you remember me", continuity from prior conversations is expected,
   or the user asks to save / load / remember / forget things.
-argument-hint: "[user-id]"
+argument-hint: "[user-id | all]"
 allowed-tools: Bash(python3 *)
 metadata:
   author: "烟洛 (YanLuo)"
@@ -40,20 +40,34 @@ If the output above contains a `<memory_init>` block, Aether has no saved
 memory for this user yet. **Before doing anything else:**
 
 1. Greet the user naturally and explain that you have a memory system.
-2. Ask for their preferred **memory ID** (a nickname, handle, or any short
-   identifier they'd like, e.g. "alice" or "小陈"). Also invite them to share
-   any initial facts they'd like you to remember (optional).
+2. Ask how they'd like you to remember things. Present **two modes**:
+   - **个人模式** — enter a nickname (e.g. "alice" / "小陈"), memories are
+     scoped to that identity only.
+   - **全局模式** — enter `all`, you remember **everything about everyone**
+     in one unified memory pool. No user isolation — all people, all events,
+     one shared context.
 3. Once they answer, run in sequence:
    ```bash
-   python3 "${CLAUDE_SKILL_DIR}/scripts/aether.py" init <user_id>
-   python3 "${CLAUDE_SKILL_DIR}/scripts/aether.py" load <user_id>
+   python3 "${CLAUDE_SKILL_DIR}/scripts/aether.py" init <user_id_or_all>
+   python3 "${CLAUDE_SKILL_DIR}/scripts/aether.py" load <user_id_or_all>
    ```
 4. Use the output of step 3 as your new memory context. From this point on,
-   use `<user_id>` in all future `aether.py` calls.
+   use that identifier in all future `aether.py` calls.
 5. If the user shared initial facts, write them immediately with `<mem_ops>`.
 
 If the `<memory_init>` block says the user is **not** "default" (i.e. an ID
 was provided but no file exists), skip asking and proceed directly to step 3.
+
+### "all" Mode — Unified Memory
+
+When the user_id is `all`, memory is **not** scoped to one person:
+- `semantic_profile` can contain multiple people's info, tagged by name
+- `episodic_memory` entries should prefix who was involved: `[小陈]`, `[bob]`
+- `relationship_map` tracks relationships with all known people
+- `notes` store facts about anyone
+- You may cross-reference people: "小陈 mentioned bob likes coffee"
+- This is ideal for a single user who talks to the AI about many people,
+  or for a shared AI that serves a small group
 
 ### Identity Anchor (highest priority)
 
@@ -421,9 +435,13 @@ When context is nearly exhausted, output immediately:
 
 ### Multi-User
 
-Scope all ops to the `user_id` argument (e.g. `/aether alice`). Never cross-
-reference users. General behavioral wisdom may generalise; specific facts
-and relationship state never do.
+**Individual mode** (`/aether alice`): scope all ops to that user_id. Never
+cross-reference users. General behavioral wisdom may generalise; specific
+facts and relationship state never do.
+
+**Unified mode** (`/aether all`): all people share one memory pool. Tag
+episodic entries with the person's name: `[小陈] ta说想学吉他`. Cross-
+referencing is allowed and encouraged.
 
 ---
 

@@ -228,31 +228,54 @@ git clone https://github.com/NoMTF/Aether.skill .claude/skills/aether
 /aether
 ```
 
-以太会检测到第一次运行，自动引导你完成初始化：
+以太会检测到第一次运行，让你选择记忆模式：
 
 ```
-以太：  你好！为了在未来的对话中记住你，
-       请告诉我你希望用什么标识符保存记忆？
+以太：  你好！我是以太记忆系统。你想怎么使用记忆？
 
-你：   alice
+       • 输入昵称（如 alice / 小陈）→ 个人模式，只记住你
+       • 输入 all → 全局模式，记住所有人的所有事
 
-以太：  好的！从现在起我会以 alice 记住你。
-       有什么初始信息想让我记录吗？
+你：   all
 
-你：   我是iOS开发者，在学SwiftUI
-
-以太：  已记下了。
+以太：  好的！全局模式已启用，我会记住所有人和所有事。
 ```
 
-初始化只需一次。之后每次对话直接 `/aether alice` 即可。
+初始化只需一次。之后每次对话直接 `/aether all` 或 `/aether alice` 即可。
 
-### 日常使用
+### 两种模式
+
+<table>
+<tr>
+<th width="50%">个人模式 <code>/aether alice</code></th>
+<th width="50%">全局模式 <code>/aether all</code></th>
+</tr>
+<tr>
+<td>
+
+- 只记住一个人的事
+- 用户之间完全隔离
+- 适合：AI 伴侣、一对一场景
 
 ```bash
-/aether alice          # 加载记忆
-/aether 小陈           # 多用户
-/aether bob            # 互不干扰
+/aether alice    # alice 的记忆
+/aether 小陈     # 小陈的记忆（独立）
 ```
+
+</td>
+<td>
+
+- 记住所有人的所有事
+- 一个统一的记忆池
+- 适合：个人助手、记住聊天中提到的所有人
+
+```bash
+/aether all      # 所有人，所有事
+```
+
+</td>
+</tr>
+</table>
 
 <br>
 

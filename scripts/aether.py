@@ -1005,8 +1005,9 @@ def format_memory_load(memory: dict) -> str:
     # Archive summary
     summary = arch.get("summary", "")
     count = arch.get("entry_count", 0)
+    mode = "unified" if user_id == "all" else "individual"
     parts = [
-        f'<memory_load session="{session + 1}" previous_session="{session}" user_id="{user_id}">',
+        f'<memory_load session="{session + 1}" previous_session="{session}" user_id="{user_id}" mode="{mode}">',
         wrap("semantic_profile", modules.get("semantic_profile", "[尚未建立档案]"), cap_attr("semantic_profile")),
         wrap("notes", notes_text, cap_attr("notes")),
         wrap("relationship_map", modules.get(
@@ -1051,14 +1052,24 @@ def format_memory_init(user_id: str) -> str:
     """
     if user_id == "default":
         instruction = (
-            "以太尚未绑定用户身份。请向用户说明情况并询问：\n"
-            "  1. 你希望用什么标识符保存记忆？（昵称、英文名均可，例如 alice / 小陈）\n"
+            "以太尚未绑定记忆模式。请向用户说明情况并询问：\n"
+            "  1. 选择记忆模式：\n"
+            "     • 输入昵称（如 alice / 小陈）→ 个人模式，只记住你一个人\n"
+            "     • 输入 all → 全局模式，记住所有人的所有事\n"
             "  2. 有没有你希望我初始就记住的信息？（可选）\n\n"
             "获取用户回答后，依次执行：\n"
-            "  a. python3 \"${CLAUDE_SKILL_DIR}/scripts/aether.py\" init <user_id>\n"
-            "  b. python3 \"${CLAUDE_SKILL_DIR}/scripts/aether.py\" load <user_id>\n"
-            "  c. 将步骤 b 的输出作为新的记忆状态，此后所有操作使用该 user_id。\n"
-            "  d. 如果用户提供了初始信息，立刻用 <mem_ops> 写入 semantic_profile。"
+            "  a. python3 \"${CLAUDE_SKILL_DIR}/scripts/aether.py\" init <user_id_or_all>\n"
+            "  b. python3 \"${CLAUDE_SKILL_DIR}/scripts/aether.py\" load <user_id_or_all>\n"
+            "  c. 将步骤 b 的输出作为新的记忆状态，此后所有操作使用该标识符。\n"
+            "  d. 如果用户提供了初始信息，立刻用 <mem_ops> 写入。"
+        )
+    elif user_id == "all":
+        instruction = (
+            "全局记忆模式（all）文件尚不存在，即将初始化。\n"
+            "全局模式：记住所有人的所有事，不区分用户。\n"
+            "episodic 条目应以 [人名] 为前缀标识相关人物。\n"
+            "已注入空白记忆。对话结束时请运行：\n"
+            "  python3 \"${CLAUDE_SKILL_DIR}/scripts/aether.py\" save all"
         )
     else:
         instruction = (
@@ -1066,8 +1077,9 @@ def format_memory_init(user_id: str) -> str:
             f"已注入空白记忆。对话结束时请运行：\n"
             f"  python3 \"${{CLAUDE_SKILL_DIR}}/scripts/aether.py\" save {user_id}"
         )
+    mode = "unified" if user_id == "all" else "individual"
     return (
-        f'<memory_init user_id="{user_id}" first_run="true">\n'
+        f'<memory_init user_id="{user_id}" mode="{mode}" first_run="true">\n'
         f'{_ind(instruction)}\n'
         f'</memory_init>'
     )
