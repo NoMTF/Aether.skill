@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 """
-Aether Memory System — Backend Script  v2.0
+Aether Memory System — Backend Script  v3.0
 以太记忆系统 · 后端存储层
 
 Two-tier storage: hot JSON (active context) + cold JSONL archive (never deleted).
 Episodic entries are archived when fuzzy/old, not silently dropped.
+Associative Memory Network: memories form webs of association — recalling one
+memory passively strengthens related memories (Spreading Activation Theory).
 
 Commands:
   load        [user_id]            Load memory → print <memory_load> XML
@@ -19,6 +21,7 @@ Commands:
   prune       [user_id]            Archive all fuzzy / low-importance entries
   recall      [user_id] kw...      Search cold archive for keywords
   export      [user_id]            Full JSON export (hot + archive)
+  drift       [user_id]            Emotional trajectory analysis across sessions
 
 Options:
   --dir DIR      Override storage directory
@@ -59,6 +62,17 @@ PRIMACY_BOOST             = 1.0
 RECENCY_PROTECTED         = 5    # Most-recent N hot entries immune to auto-archive
 # Negative-valence emoji set (Baumeister negativity bias)
 NEGATIVE_EMOTIONS = frozenset("😢😤💢🥺😭😰😣😖😫😔😞")
+
+# Associative Memory Network (Collins & Loftus, 1975 — Spreading Activation)
+ASSOCIATION_PASSIVE_BOOST  = 0.15  # Boost to associated entries when one is reinforced
+ASSOCIATION_MAX_BOOST      = 1.2   # Cap on total association-derived boost per entry
+ASSOCIATION_MAX_LINKS      = 5     # Max explicit associations per entry
+TEMPORAL_PROXIMITY_WINDOW  = 1     # Sessions within this window auto-link (weak)
+EMOTIONAL_RESONANCE_EMOJIS = {
+    "positive": frozenset("😊😄😆🥰😍🤗💖✨🎉"),
+    "negative": frozenset("😢😤💢🥺😭😰😣😖😫😔😞"),
+    "neutral":  frozenset("😐🤔📝💡"),
+}
 
 BLANK_MEMORY: dict = {
     "user_id": "default",
@@ -261,6 +275,8 @@ def effective_importance(entry: dict, current_session: int) -> float:
                                    emotions decay slower.  (Baumeister 2001)
     ③ Primacy boost             — entries born in the first PRIMACY_SESSION_CUTOFF
                                    sessions get +PRIMACY_BOOST.  (Atkinson & Shiffrin 1968)
+    ④ Association boost         — passive boost from spreading activation when
+                                   linked memories are reinforced.  (Collins & Loftus 1975)
 
     Flashbulb entries return ∞ (99) — they are indestructible.
     """
@@ -275,7 +291,124 @@ def effective_importance(entry: dict, current_session: int) -> float:
     # ③ Primacy (only if first_session was recorded at creation time)
     fs = entry.get("first_session")
     primacy = PRIMACY_BOOST if (fs is not None and fs <= PRIMACY_SESSION_CUTOFF) else 0.0
-    return base + srs + valence + primacy
+    # ④ Association boost (spreading activation)
+    assoc = min(entry.get("association_boost", 0.0), ASSOCIATION_MAX_BOOST)
+    return base + srs + valence + primacy + assoc
+
+
+# ---------------------------------------------------------------------------
+# Associative Memory Network — Spreading Activation (Collins & Loftus 1975)
+# ---------------------------------------------------------------------------
+
+def _extract_emotion_class(raw: str) -> str:
+    """Classify entry's dominant emotion for resonance linking."""
+    for cls, emojis in EMOTIONAL_RESONANCE_EMOJIS.items():
+        if any(ch in raw for ch in emojis):
+            return cls
+    return "neutral"
+
+
+def _extract_keywords(raw: str) -> set[str]:
+    """Extract meaningful keywords from raw text for topic-based linking."""
+    # Strip the ID/star prefix, keep the summary part
+    parts = raw.split("|", 1)
+    text = parts[-1].strip() if len(parts) > 1 else raw
+    # Remove markers, punctuation, split into tokens
+    text = re.sub(r"\[.*?\]", "", text)
+    text = re.sub(r"[#★☆⚡\d]", "", text)
+    tokens = set(re.findall(r"[\u4e00-\u9fff]+|[a-zA-Z]{3,}", text))
+    return tokens
+
+
+def compute_auto_associations(entries: list[dict]) -> dict[str, list[str]]:
+    """
+    Build weak auto-associations between entries based on:
+    1. Temporal proximity (same or adjacent sessions)
+    2. Emotional resonance (same emotion class)
+    3. Keyword co-occurrence (shared topic terms)
+
+    Returns {entry_id: [associated_ids]} — only new auto-links, not explicit ones.
+    """
+    if len(entries) < 2:
+        return {}
+
+    associations: dict[str, set[str]] = {e["id"]: set() for e in entries}
+
+    for i, a in enumerate(entries):
+        a_session = a.get("first_session") or 0
+        a_emotion = _extract_emotion_class(a.get("raw", ""))
+        a_keywords = _extract_keywords(a.get("raw", ""))
+
+        for b in entries[i + 1:]:
+            b_session = b.get("first_session") or 0
+            score = 0.0
+
+            # Temporal proximity
+            if abs(a_session - b_session) <= TEMPORAL_PROXIMITY_WINDOW:
+                score += 0.4
+
+            # Emotional resonance
+            b_emotion = _extract_emotion_class(b.get("raw", ""))
+            if a_emotion == b_emotion and a_emotion != "neutral":
+                score += 0.3
+
+            # Keyword co-occurrence
+            b_keywords = _extract_keywords(b.get("raw", ""))
+            overlap = a_keywords & b_keywords
+            if len(overlap) >= 1:
+                score += 0.3 * min(len(overlap), 3)
+
+            # Link if score above threshold
+            if score >= 0.6:
+                if len(associations[a["id"]]) < ASSOCIATION_MAX_LINKS:
+                    associations[a["id"]].add(b["id"])
+                if len(associations[b["id"]]) < ASSOCIATION_MAX_LINKS:
+                    associations[b["id"]].add(a["id"])
+
+    return {k: sorted(v) for k, v in associations.items() if v}
+
+
+def spreading_activation(entries: list[dict], reinforced_id: str) -> list[tuple[str, float]]:
+    """
+    When a memory is reinforced, compute passive boosts for associated entries.
+    Returns [(entry_id, boost_amount)] for entries that should receive a passive boost.
+    """
+    source = next((e for e in entries if e["id"] == reinforced_id), None)
+    if not source:
+        return []
+
+    # Combine explicit + auto associations
+    explicit_links = set(source.get("associations", []))
+    auto_links = compute_auto_associations(entries).get(reinforced_id, [])
+    all_linked = explicit_links | set(auto_links)
+
+    boosts = []
+    for linked_id in all_linked:
+        target = next((e for e in entries if e["id"] == linked_id), None)
+        if target and not target.get("flashbulb"):
+            current_assoc_boost = target.get("association_boost", 0.0)
+            if current_assoc_boost < ASSOCIATION_MAX_BOOST:
+                boost = min(ASSOCIATION_PASSIVE_BOOST,
+                            ASSOCIATION_MAX_BOOST - current_assoc_boost)
+                boosts.append((linked_id, boost))
+
+    return boosts
+
+
+def apply_spreading_activation(entries: list[dict], reinforced_id: str) -> int:
+    """
+    Apply spreading activation after a reinforce operation.
+    Returns count of entries that received a passive boost.
+    """
+    boosts = spreading_activation(entries, reinforced_id)
+    count = 0
+    for entry_id, boost in boosts:
+        for e in entries:
+            if e["id"] == entry_id:
+                e["association_boost"] = e.get("association_boost", 0.0) + boost
+                count += 1
+                break
+    return count
 
 
 # ---------------------------------------------------------------------------
@@ -297,6 +430,9 @@ def parse_episodic_entry(raw: str) -> dict:
         "flashbulb":              "[⚡]" in raw,
         "suppressed":             "[已压制]" in raw,
         "fuzzy":                  "[模糊]" in raw,
+        # Associative Memory Network fields
+        "associations":           [],     # Explicit links to related entries
+        "association_boost":      0.0,    # Passive boost from spreading activation
     }
     if m:
         return {**base, "id": m.group(1).lstrip("#"), "raw": raw,
@@ -367,6 +503,11 @@ def parse_mem_ops(text: str) -> list[dict]:
             r'<retract\s+id="([^"]+)">(.*?)</retract>', block, re.DOTALL
         ):
             ops.append({"op": "retract", "id": id_.strip().lstrip("#"), "reason": reason.strip()})
+        # Associative Memory Network: <associate ids="eNN,eMM"/> — explicit link
+        for ids_str in re.findall(r'<associate\s+ids="([^"]+)"\s*/>', block):
+            ids = [i.strip().lstrip("#") for i in ids_str.split(",")]
+            if len(ids) >= 2:
+                ops.append({"op": "associate", "ids": ids})
     return ops
 
 
@@ -600,7 +741,23 @@ def apply_ops(d: Path, user_id: str, memory: dict, ops: list[dict]) -> dict:
                         marker = f" [S{session}重构: {op['note'][:40]}]"
                         # Replace previous reconsolidation note if present
                         e["raw"] = re.sub(r" \[S\d+重构:[^\]]+\]", "", e["raw"]) + marker
+                    # Spreading Activation: boost associated memories
+                    apply_spreading_activation(
+                        modules.get("episodic_memory", []), rid
+                    )
                     break
+
+        # ── Associative Memory Network: explicit link ────────────────────
+        elif o == "associate":
+            ep_list = modules.get("episodic_memory", [])
+            link_ids = set(op["ids"])
+            for e in ep_list:
+                if e["id"] in link_ids:
+                    assoc = e.setdefault("associations", [])
+                    for other_id in link_ids:
+                        if other_id != e["id"] and other_id not in assoc:
+                            if len(assoc) < ASSOCIATION_MAX_LINKS:
+                                assoc.append(other_id)
 
         # ── SRS: flashbulb ───────────────────────────────────────────────
         elif o == "flashbulb":
@@ -831,6 +988,11 @@ def cmd_status(args: argparse.Namespace, d: Path) -> None:
         eff_scores.sort(key=lambda x: -x[1])
         top3_eff = "  ".join(f"#{i}={s:.1f}" for i, s in eff_scores[:3])
         print(f"  Eff.imp : {top3_eff}")
+    # Association network stats
+    assoc_links = sum(len(e.get("associations", [])) for e in ep)
+    assoc_boosted = sum(1 for e in ep if e.get("association_boost", 0) > 0)
+    if assoc_links > 0 or assoc_boosted > 0:
+        print(f"  Assoc.  : {assoc_links} links, {assoc_boosted} entries boosted")
     print(f"Behavioral     : {len(bm)}/{BEHAVIORAL_CAPACITY}")
     print(f"Notes          : {len(notes)}/{NOTES_CAPACITY}")
     print(f"Archive        : {arch.get('entry_count', 0)} entries"
@@ -978,6 +1140,71 @@ def cmd_export(args: argparse.Namespace, d: Path) -> None:
     print(json.dumps(export, ensure_ascii=False, indent=2))
 
 
+def cmd_drift(args: argparse.Namespace, d: Path) -> None:
+    """Emotional trajectory analysis — track how the relationship evolves."""
+    user_id = args.user_id or "default"
+    memory = load_memory(d, user_id)
+    modules = memory.get("modules", {})
+    ep = modules.get("episodic_memory", [])
+    archive = load_archive_entries(d, user_id)
+    all_entries = ep + archive
+
+    if not all_entries:
+        print(f"[aether] No memories to analyze for '{user_id}'.")
+        return
+
+    # Group by session
+    sessions: dict[int, list[dict]] = {}
+    for e in all_entries:
+        s = e.get("first_session") or e.get("archived_session") or 0
+        sessions.setdefault(s, []).append(e)
+
+    print(f"╔══════════════════════════════════════════════════╗")
+    print(f"║  Emotional Drift Analysis — {user_id:<20s} ║")
+    print(f"╠══════════════════════════════════════════════════╣")
+
+    # Per-session emotional analysis
+    for s in sorted(sessions.keys()):
+        entries = sessions[s]
+        pos = sum(1 for e in entries if _extract_emotion_class(e.get("raw", "")) == "positive")
+        neg = sum(1 for e in entries if _extract_emotion_class(e.get("raw", "")) == "negative")
+        total = len(entries)
+        avg_imp = sum(e.get("importance", 3) for e in entries) / total if total else 0
+
+        # Visual bar
+        bar_len = 20
+        if total > 0:
+            pos_bar = int(pos / total * bar_len)
+            neg_bar = int(neg / total * bar_len)
+            neu_bar = bar_len - pos_bar - neg_bar
+        else:
+            pos_bar = neg_bar = 0
+            neu_bar = bar_len
+        bar = "█" * pos_bar + "░" * neu_bar + "▓" * neg_bar
+
+        print(f"║  S{s:<3d} [{bar}] {total:>2d}条  avg★{avg_imp:.1f}  +{pos}/-{neg}  ║")
+
+    # Relationship arc
+    arc = memory.get("archive", {}).get("relationship_arc", [])
+    if arc:
+        print(f"╠══════════════════════════════════════════════════╣")
+        arc_str = " → ".join(f"S{a['session']}:{a['familiarity']}" for a in arc)
+        # Wrap long arcs
+        while len(arc_str) > 46:
+            print(f"║  {arc_str[:46]}  ║")
+            arc_str = arc_str[46:]
+        print(f"║  {arc_str:<46s}  ║")
+
+    # Association network stats
+    assoc_count = sum(len(e.get("associations", [])) for e in ep)
+    boosted = sum(1 for e in ep if e.get("association_boost", 0) > 0)
+    if assoc_count > 0 or boosted > 0:
+        print(f"╠══════════════════════════════════════════════════╣")
+        print(f"║  Association Network: {assoc_count} links, {boosted} boosted   ║")
+
+    print(f"╚══════════════════════════════════════════════════╝")
+
+
 # ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
@@ -985,12 +1212,13 @@ def cmd_export(args: argparse.Namespace, d: Path) -> None:
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="aether",
-        description="Aether Memory System v2.0 — two-tier persistent memory for AI personas.",
+        description="Aether Memory System v3.0 — two-tier persistent memory for AI personas.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     p.add_argument("command", choices=[
         "load", "save", "apply", "init", "status", "list",
         "history", "consolidate", "forget", "prune", "recall", "export",
+        "drift",
     ])
     p.add_argument("user_id", nargs="?", default=None)
     p.add_argument("keywords", nargs="*", help="Keywords for recall command")
@@ -1023,6 +1251,7 @@ def main() -> None:
         "prune":       cmd_prune,
         "recall":      cmd_recall,
         "export":      cmd_export,
+        "drift":       cmd_drift,
     }[args.command](args, d)
 
 

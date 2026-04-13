@@ -4,9 +4,16 @@
   "last_updated": null,
   "modules": {
     "semantic_profile": "[尚未建立档案]",
+    "notes": [],
     "episodic_memory": [],
     "relationship_map": "熟悉度: 陌生人\n信任度: 未知\n好感度: 无感\n互动基调: 待观察\n关键转折点: 无",
     "behavioral_memory": [],
     "emotional_sediment": "新的对话。新的人。保持距离，先观察。"
+  },
+  "archive": {
+    "summary": "",
+    "entry_count": 0,
+    "sessions_archived": 0,
+    "relationship_arc": []
   }
 }
