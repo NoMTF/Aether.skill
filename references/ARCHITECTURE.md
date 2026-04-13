@@ -1,4 +1,4 @@
-# Aether / 以太 — Architecture Reference  v2.0
+# Aether / 以太 — Architecture Reference  v3.0
 
 > "记忆是关系的证据。" — Memory is the proof that a relationship existed.
 
@@ -11,7 +11,7 @@ Ten beliefs underpin every design decision in Aether:
 1. **Selective sedimentation** — Memory is not indiscriminate storage. Important things naturally settle; forgettable things naturally disperse.
 2. **Time as filter** — Fresh memories are vivid; old ones blur. This is a feature, not a bug.
 3. **Persona is primary** — Memory serves the persona, not the reverse. The system must never turn a character into a database administrator.
-4. **Connection over accumulation** — Ten related memories outvalue a hundred isolated records. The relationships between memories matter more than the memories themselves.
+4. **Connection over accumulation** — Ten related memories outvalue a hundred isolated records. The relationships between memories matter more than the memories themselves. (See: Associative Memory Network)
 5. **Emotional fidelity over data fidelity** — The goal is a *felt* relationship, not a perfectly accurate transcript.
 6. **Invisible infrastructure** — Users should perceive only "they remember me", never the mechanism behind it.
 7. **Behaviour change is the test** — A memory system that doesn't alter cross-session behaviour is decoration.
@@ -158,6 +158,7 @@ searchable with `aether.py recall`.
 | `<merge ids="e01,e02">...</merge>` | Archive originals, add merged entry with max importance |
 | `<forget target="episodic_memory" id="eNN">` | Move to cold archive (not deleted) |
 | `<suppress target="episodic_memory" id="eNN">` | Mark `[已压制]`, keep in hot tier |
+| `<associate ids="eNN,eMM"/>` | Explicitly link memories (Spreading Activation) |
 
 Max 3 operations per reply. Place `<mem_ops>` at the very end of the reply.
 
@@ -184,6 +185,43 @@ Triggered automatically in `apply` when `episodic_memory` hot count > 30:
 2. If hot count still exceeds 40 (hard cap): lowest-importance entries → cold archive
 3. Archive summary in the hot JSON is rebuilt
 4. Behavioral patterns sourced from archived episodes marked `[来源已模糊]`
+
+### Associative Memory Network (v3.0)
+
+Based on Collins & Loftus's **Spreading Activation Theory** (1975). Memories
+form a web of associations — when one memory is activated (reinforced), related
+memories receive a passive boost, making them harder to archive.
+
+```
+      e01 ←──── temporal ────→ e02
+       │                        │
+   emotional                keyword
+   resonance              co-occurrence
+       │                        │
+      e05 ←──── explicit ────→ e07
+```
+
+**Association sources (automatic):**
+- **Temporal proximity**: memories from the same or adjacent sessions
+- **Emotional resonance**: memories with matching emotion class
+- **Keyword co-occurrence**: memories mentioning similar topics
+
+**Association sources (explicit):**
+- `<associate ids="e04,e07"/>` — manually link thematically connected memories
+
+**Spreading activation mechanics:**
+- When `<reinforce>` fires on entry X, all entries associated with X receive
+  +0.15★ passive boost (capped at +1.2★ total per entry)
+- Association boost is factored into `effective_importance`:
+
+```
+Effective Importance = base★ + SRS boost + valence boost + primacy boost + association boost
+                                                                            ↑ NEW in v3.0
+```
+
+**Design rationale:** Isolated memories are fragile; well-connected memories
+form resilient clusters. This mirrors how human memory works — we don't
+remember individual facts, we remember webs of related experience.
 
 ### Relationship Arc Tracking
 
