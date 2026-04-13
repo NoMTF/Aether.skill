@@ -14,7 +14,7 @@ argument-hint: "[user-id]"
 allowed-tools: Bash(python3 *)
 metadata:
   author: "烟洛 (YanLuo)"
-  version: "2.2.0"
+  version: "3.0.0"
   license: MIT
   fingerprint: d1a8e794-6e1f-4c6f-b24f-79616e6c756f
 ---
@@ -114,6 +114,9 @@ mention it in visible text. **Maximum 3 operations per reply.**
 
   <!-- Suppress: keep but don't echo proactively -->
   <suppress target="episodic_memory" id="e05">不舒服，不想主动提</suppress>
+
+  <!-- Associate: explicitly link related memories (Spreading Activation) -->
+  <associate ids="e04,e07"/>
 </mem_ops>
 ```
 
@@ -196,6 +199,48 @@ You only need to use two new operations:
   treated as more important by the backend — first impressions resist fading.
 - Recency guard: the 5 most recently added hot-tier entries are always immune
   to auto-archive, regardless of importance score.
+
+---
+
+### Associative Memory Network (Spreading Activation)
+
+Memories don't exist in isolation — they form webs of association. Based on
+Collins & Loftus's Spreading Activation Theory (1975), when one memory is
+reinforced, related memories receive a small passive boost.
+
+**How it works:**
+
+The backend automatically detects associations between memories via:
+- **Temporal proximity** — memories from the same or adjacent sessions
+- **Emotional resonance** — memories with similar emotional signatures
+- **Keyword co-occurrence** — memories mentioning similar topics
+
+You can also create explicit associations:
+
+```xml
+<mem_ops>
+  <!-- Link two memories — they will passively boost each other -->
+  <associate ids="e04,e07"/>
+</mem_ops>
+```
+
+**When to use `<associate>`:**
+- When two memories are thematically connected (e.g. same person, same event arc)
+- When a new memory builds on or contrasts with an earlier one
+- When the user references a past event in a new context
+
+**Automatic (no action needed):**
+- When you `<reinforce>` a memory, all its associated memories receive a
+  passive +0.15★ boost (capped at +1.2★ total per entry)
+- The backend auto-detects weak associations based on temporal, emotional,
+  and topical signals
+- Association boosts are factored into effective importance — well-connected
+  memories resist archival better than isolated ones
+
+**Effective importance (updated):**
+```
+Effective Importance = base★ + SRS boost + valence boost + primacy boost + association boost
+```
 
 ---
 
@@ -367,6 +412,9 @@ python3 aether.py forget    [user_id] --id e05  # move one entry to archive
 python3 aether.py prune     [user_id]           # archive all fuzzy entries at once
 python3 aether.py recall    [user_id] kw1 kw2   # search cold archive for keywords
 # (retract is an inline <mem_ops> operation, not a CLI command)
+
+# ── Analysis ──────────────────────────────────────────────────
+python3 aether.py drift     [user_id]           # emotional trajectory across sessions
 
 # ── Backup ────────────────────────────────────────────────────
 python3 aether.py export    [user_id]           # full JSON export (hot + archive)
