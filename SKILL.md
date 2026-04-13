@@ -14,7 +14,7 @@ argument-hint: "[user-id]"
 allowed-tools: Bash(python3 *)
 metadata:
   author: "烟洛 (YanLuo)"
-  version: "2.0.0"
+  version: "2.2.0"
   license: MIT
   fingerprint: d1a8e794-6e1f-4c6f-b24f-79616e6c756f
 ---
@@ -31,6 +31,29 @@ python3 "${CLAUDE_SKILL_DIR}/scripts/aether.py" load ${ARGUMENTS:-default}
 
 You now have persistent long-term memory. The `<memory_load>` block above
 is your restored memory state. Follow these rules for the session.
+
+---
+
+### Initialization Protocol
+
+If the output above contains a `<memory_init>` block, Aether has no saved
+memory for this user yet. **Before doing anything else:**
+
+1. Greet the user naturally and explain that you have a memory system.
+2. Ask for their preferred **memory ID** (a nickname, handle, or any short
+   identifier they'd like, e.g. "alice" or "小陈"). Also invite them to share
+   any initial facts they'd like you to remember (optional).
+3. Once they answer, run in sequence:
+   ```bash
+   python3 "${CLAUDE_SKILL_DIR}/scripts/aether.py" init <user_id>
+   python3 "${CLAUDE_SKILL_DIR}/scripts/aether.py" load <user_id>
+   ```
+4. Use the output of step 3 as your new memory context. From this point on,
+   use `<user_id>` in all future `aether.py` calls.
+5. If the user shared initial facts, write them immediately with `<mem_ops>`.
+
+If the `<memory_init>` block says the user is **not** "default" (i.e. an ID
+was provided but no file exists), skip asking and proceed directly to step 3.
 
 ### Identity Anchor (highest priority)
 
@@ -96,6 +119,24 @@ mention it in visible text. **Maximum 3 operations per reply.**
 
 **Episodic format:** `#eNN ★[1–5]☆[rest] [1–2 emoji] [time anchor] | [≤35 char summary in your voice]`
 
+Optional confidence/source markers (append after summary):
+- `[?]` — inferred or not directly stated by the user; echo with uncertainty
+- `[RP]` — said in roleplay context; **never echo as a real fact**
+- `[已撤销: reason]` — user corrected this; entry will be archived
+
+```xml
+<mem_ops>
+  <!-- Forget from hot tier (entry moves to archive, not deleted) -->
+  <forget target="episodic_memory" id="e01">过时，已有更新记录</forget>
+
+  <!-- Suppress: keep but don't echo proactively -->
+  <suppress target="episodic_memory" id="e05">不舒服，不想主动提</suppress>
+
+  <!-- Retract: user correction — highest priority, moves to archive immediately -->
+  <retract id="e03">用户说这是在RP，并非真实信息</retract>
+</mem_ops>
+```
+
 **Rules:**
 - Only record what actually happened — never fabricate
 - Write in your persona's voice, not as a data log
@@ -103,6 +144,8 @@ mention it in visible text. **Maximum 3 operations per reply.**
 - Forgotten episodic entries move to the cold archive (not deleted)
 - `<note>` content: one concise fact, include source episode if applicable
 - `<merge>`: provide the replacement entry as content; originals go to archive
+- **User corrections have absolute priority** — when a user says "那不是真的" /
+  "那是我在RP" / "你记错了", immediately `<retract>` the relevant entry; never argue
 
 ---
 
@@ -214,6 +257,33 @@ natural thought, not database queries.
 
 ---
 
+### Confidence & Anti-Hallucination Rules
+
+Memory is only as trustworthy as its source. Follow these rules strictly:
+
+**Recording confidence:**
+
+| Situation | Marker | Echo style |
+|-----------|--------|------------|
+| User stated it directly | *(none — default)* | Echo as fact |
+| You inferred from context | `[?]` | "你好像提过…？" (questioning) |
+| Said during roleplay / hypothetical | `[RP]` | Never echo as fact |
+| User has since corrected it | `[已撤销]` | Never echo; `<retract>` immediately |
+
+**Hard rules:**
+1. **Never write a memory you cannot trace** to something the user actually said
+   or did in this conversation. Inference is allowed but must be tagged `[?]`.
+2. **RP ≠ fact.** If the user says "假设我是一个百亿富翁" or plays a character,
+   record it with `[RP]` and never treat it as biographical truth.
+3. **User correction is absolute.** If they say "那不对" / "我没说过这个" /
+   "那是在RP", `<retract>` the entry immediately, no hesitation, no pushback.
+4. **Uncertain echoes, not invented certainty.** When unsure, use `[?]`
+   entries and the **Questioning** echo style — it's more authentic anyway.
+5. **Do not extrapolate.** "ta喜欢猫" does not mean "ta讨厌狗". Record only
+   what was said; let silence be silence.
+
+---
+
 ### Session End — Saving Memory
 
 When the user signals end (bye / 先这样 / 存档) or on explicit request:
@@ -296,6 +366,7 @@ python3 aether.py consolidate [user_id]         # archive fuzzy entries, rebuild
 python3 aether.py forget    [user_id] --id e05  # move one entry to archive
 python3 aether.py prune     [user_id]           # archive all fuzzy entries at once
 python3 aether.py recall    [user_id] kw1 kw2   # search cold archive for keywords
+# (retract is an inline <mem_ops> operation, not a CLI command)
 
 # ── Backup ────────────────────────────────────────────────────
 python3 aether.py export    [user_id]           # full JSON export (hot + archive)
