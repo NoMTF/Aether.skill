@@ -362,6 +362,11 @@ def parse_mem_ops(text: str) -> list[dict]:
         # SRS: <flashbulb id="eNN"/> — mark as indestructible
         for id_ in re.findall(r'<flashbulb\s+id="([^"]+)"\s*/?>', block):
             ops.append({"op": "flashbulb", "id": id_.strip().lstrip("#")})
+        # Confidence: <retract id="eNN">reason</retract> — user correction, moves to archive
+        for id_, reason in re.findall(
+            r'<retract\s+id="([^"]+)">(.*?)</retract>', block, re.DOTALL
+        ):
+            ops.append({"op": "retract", "id": id_.strip().lstrip("#"), "reason": reason.strip()})
     return ops
 
 
@@ -608,6 +613,28 @@ def apply_ops(d: Path, user_id: str, memory: dict, ops: list[dict]) -> dict:
                         e["raw"] = re.sub(r"(#e\d+)", r"\1 [⚡]", e["raw"], count=1)
                     break
 
+        # ── Confidence: retract (user correction, highest priority) ──────
+        elif o == "retract":
+            retract_id = op["id"]
+            ep_list = modules.get("episodic_memory", [])
+            to_retract = [e for e in ep_list if e["id"] == retract_id]
+            if to_retract:
+                reason = op.get("reason", "")
+                for e in to_retract:
+                    tag = f" [已撤销: {reason}]" if reason else " [已撤销]"
+                    if "[已撤销]" not in e["raw"]:
+                        e["raw"] += tag
+                    e["retracted"] = True
+                    e["retract_reason"] = reason
+                    e["importance"] = 1   # Downgrade so it archives quickly
+                modules["episodic_memory"] = [e for e in ep_list if e["id"] != retract_id]
+                _archive_entries(d, user_id, memory, to_retract)
+                # Also nullify any behavioral patterns sourced from this entry
+                for be in modules.get("behavioral_memory", []):
+                    if retract_id in [s.lstrip("#") for s in be.get("source_ids", [])]:
+                        be["raw"] = re.sub(r"\(来源[：:][^)]+\)", "(来源已撤销)", be["raw"])
+                        be["retracted_source"] = True
+
     # Auto-consolidate fuzzy entries if above threshold
     auto_consolidate(d, user_id, memory)
     return memory
@@ -677,16 +704,52 @@ def format_memory_load(memory: dict) -> str:
 
 
 # ---------------------------------------------------------------------------
+# First-run init block
+# ---------------------------------------------------------------------------
+
+def format_memory_init(user_id: str) -> str:
+    """
+    Output when no memory file exists yet.  Tells the AI to ask the user for
+    their preferred ID (and any initial facts) before the session begins.
+    """
+    if user_id == "default":
+        instruction = (
+            "以太尚未绑定用户身份。请向用户说明情况并询问：\n"
+            "  1. 你希望用什么标识符保存记忆？（昵称、英文名均可，例如 alice / 小陈）\n"
+            "  2. 有没有你希望我初始就记住的信息？（可选）\n\n"
+            "获取用户回答后，依次执行：\n"
+            "  a. python3 \"${CLAUDE_SKILL_DIR}/scripts/aether.py\" init <user_id>\n"
+            "  b. python3 \"${CLAUDE_SKILL_DIR}/scripts/aether.py\" load <user_id>\n"
+            "  c. 将步骤 b 的输出作为新的记忆状态，此后所有操作使用该 user_id。\n"
+            "  d. 如果用户提供了初始信息，立刻用 <mem_ops> 写入 semantic_profile。"
+        )
+    else:
+        instruction = (
+            f"用户 '{user_id}' 的记忆文件尚不存在，这是与该用户的第一次对话。\n"
+            f"已注入空白记忆。对话结束时请运行：\n"
+            f"  python3 \"${{CLAUDE_SKILL_DIR}}/scripts/aether.py\" save {user_id}"
+        )
+    return (
+        f'<memory_init user_id="{user_id}" first_run="true">\n'
+        f'{_ind(instruction)}\n'
+        f'</memory_init>'
+    )
+
+
+# ---------------------------------------------------------------------------
 # Command implementations
 # ---------------------------------------------------------------------------
 
 def cmd_load(args: argparse.Namespace, d: Path) -> None:
     user_id = args.user_id or "default"
+    is_new = not memory_path(d, user_id).exists()
     memory = load_memory(d, user_id)
     if getattr(args, "json", False):
         print(json.dumps(memory, ensure_ascii=False, indent=2))
-    else:
-        print(format_memory_load(memory))
+        return
+    print(format_memory_load(memory))
+    if is_new:
+        print(format_memory_init(user_id))
 
 
 def cmd_save(args: argparse.Namespace, d: Path) -> None:
