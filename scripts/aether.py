@@ -618,6 +618,12 @@ def apply_ops(d: Path, user_id: str, memory: dict, ops: list[dict]) -> dict:
             target = op["target"]
             content = op["content"]
 
+            # Memory integrity validation (anti-injection)
+            safe, reason = validate_entry_integrity(content)
+            if not safe:
+                print(f"[aether] {reason}", file=sys.stderr)
+                continue
+
             if target == "episodic_memory":
                 entries: list[dict] = modules.setdefault("episodic_memory", [])
                 for line in content.splitlines():
@@ -666,6 +672,11 @@ def apply_ops(d: Path, user_id: str, memory: dict, ops: list[dict]) -> dict:
 
         # ── note ─────────────────────────────────────────────────────────
         elif o == "note":
+            # Memory integrity validation
+            safe, reason = validate_entry_integrity(op["content"])
+            if not safe:
+                print(f"[aether] Note blocked: {reason}", file=sys.stderr)
+                continue
             notes: list[dict] = modules.setdefault("notes", [])
             # Deduplicate: skip if very similar raw text already exists
             if not any(op["content"][:20] in n.get("raw", "") for n in notes):
@@ -806,14 +817,174 @@ def _ind(text: str, n: int = 4) -> str:
     return "\n".join(pad + ln if ln.strip() else ln for ln in text.splitlines())
 
 
+# ---------------------------------------------------------------------------
+# Capacity-Aware Compaction (inspired by Hermes Agent's capacity management)
+# ---------------------------------------------------------------------------
+
+COMPACTION_WARN_THRESHOLD  = 0.75   # Warn when module is ≥75% full
+COMPACTION_CRITICAL_THRESHOLD = 0.90  # Critical when ≥90%
+SEMANTIC_PROFILE_CHAR_LIMIT = 600
+RELATIONSHIP_MAP_CHAR_LIMIT = 400
+EMOTIONAL_SEDIMENT_CHAR_LIMIT = 300
+
+# Patterns that suggest prompt injection attempts in memory entries
+_INJECTION_PATTERNS = [
+    re.compile(r"<\s*/?system", re.IGNORECASE),
+    re.compile(r"ignore\s+(all\s+)?previous\s+instructions", re.IGNORECASE),
+    re.compile(r"you\s+are\s+now\s+", re.IGNORECASE),
+    re.compile(r"<\s*/?prompt", re.IGNORECASE),
+    re.compile(r"ANTHROPIC_API_KEY|OPENAI_API_KEY|sk-[a-zA-Z0-9]{20,}", re.IGNORECASE),
+]
+
+
+def validate_entry_integrity(text: str) -> tuple[bool, str]:
+    """
+    Scan memory entry text for injection / exfiltration patterns.
+    Returns (is_safe, reason). Inspired by Hermes Agent's security scanning.
+    """
+    for pat in _INJECTION_PATTERNS:
+        if pat.search(text):
+            return False, f"Blocked: suspicious pattern detected ({pat.pattern[:30]}…)"
+    # Check for invisible Unicode (zero-width chars used for exfiltration)
+    invisible = set()
+    for ch in text:
+        if ord(ch) in (0x200B, 0x200C, 0x200D, 0x2060, 0xFEFF) or (0xE0000 <= ord(ch) <= 0xE007F):
+            invisible.add(f"U+{ord(ch):04X}")
+    if invisible:
+        return False, f"Blocked: invisible Unicode characters ({', '.join(invisible)})"
+    return True, ""
+
+
+def compute_capacity_report(memory: dict) -> dict:
+    """
+    Compute usage percentage for each module.
+    Returns {module_name: {used, capacity, pct, status}}.
+    """
+    modules = memory.get("modules", {})
+    report = {}
+
+    # List modules
+    ep = modules.get("episodic_memory", [])
+    report["episodic_memory"] = {
+        "used": len(ep), "capacity": EPISODIC_HOT_CAPACITY,
+        "pct": len(ep) / EPISODIC_HOT_CAPACITY if EPISODIC_HOT_CAPACITY else 0,
+    }
+    bm = modules.get("behavioral_memory", [])
+    report["behavioral_memory"] = {
+        "used": len(bm), "capacity": BEHAVIORAL_CAPACITY,
+        "pct": len(bm) / BEHAVIORAL_CAPACITY if BEHAVIORAL_CAPACITY else 0,
+    }
+    notes = modules.get("notes", [])
+    report["notes"] = {
+        "used": len(notes), "capacity": NOTES_CAPACITY,
+        "pct": len(notes) / NOTES_CAPACITY if NOTES_CAPACITY else 0,
+    }
+
+    # Text modules
+    sp = modules.get("semantic_profile", "")
+    sp_len = len(sp) if sp != "[尚未建立档案]" else 0
+    report["semantic_profile"] = {
+        "used": sp_len, "capacity": SEMANTIC_PROFILE_CHAR_LIMIT,
+        "pct": sp_len / SEMANTIC_PROFILE_CHAR_LIMIT,
+    }
+    rm = modules.get("relationship_map", "")
+    report["relationship_map"] = {
+        "used": len(rm), "capacity": RELATIONSHIP_MAP_CHAR_LIMIT,
+        "pct": len(rm) / RELATIONSHIP_MAP_CHAR_LIMIT,
+    }
+    es = modules.get("emotional_sediment", "")
+    report["emotional_sediment"] = {
+        "used": len(es), "capacity": EMOTIONAL_SEDIMENT_CHAR_LIMIT,
+        "pct": len(es) / EMOTIONAL_SEDIMENT_CHAR_LIMIT,
+    }
+
+    # Add status labels
+    for v in report.values():
+        if v["pct"] >= COMPACTION_CRITICAL_THRESHOLD:
+            v["status"] = "CRITICAL"
+        elif v["pct"] >= COMPACTION_WARN_THRESHOLD:
+            v["status"] = "WARN"
+        else:
+            v["status"] = "OK"
+
+    return report
+
+
+def generate_compaction_hints(memory: dict) -> list[str]:
+    """
+    When modules approach capacity, generate actionable hints for the AI
+    to proactively merge/consolidate entries before overflow.
+    """
+    modules = memory.get("modules", {})
+    session = memory.get("session", 0)
+    hints = []
+
+    # Episodic: suggest merge candidates (lowest-importance pairs from same session)
+    ep = modules.get("episodic_memory", [])
+    if len(ep) >= int(EPISODIC_HOT_CAPACITY * COMPACTION_WARN_THRESHOLD):
+        # Find low-importance non-protected entries
+        sortable = sorted(ep, key=lambda e: effective_importance(e, session))
+        weak = [e for e in sortable[:6] if not e.get("flashbulb")]
+        if len(weak) >= 2:
+            ids = ", ".join(f"#{e['id']}" for e in weak[:3])
+            hints.append(
+                f"episodic_memory {len(ep)}/{EPISODIC_HOT_CAPACITY} — "
+                f"consider <merge> or <forget> low-value entries: {ids}"
+            )
+
+    # Behavioral: suggest consolidation
+    bm = modules.get("behavioral_memory", [])
+    if len(bm) >= int(BEHAVIORAL_CAPACITY * COMPACTION_WARN_THRESHOLD):
+        fuzzy = [e for e in bm if e.get("fuzzy_source")]
+        if fuzzy:
+            hints.append(
+                f"behavioral_memory {len(bm)}/{BEHAVIORAL_CAPACITY} — "
+                f"{len(fuzzy)} entries have fuzzy sources, consider consolidating"
+            )
+        else:
+            hints.append(
+                f"behavioral_memory {len(bm)}/{BEHAVIORAL_CAPACITY} — approaching limit"
+            )
+
+    # Notes: warn (notes are permanent, can only merge)
+    notes = modules.get("notes", [])
+    if len(notes) >= int(NOTES_CAPACITY * COMPACTION_WARN_THRESHOLD):
+        hints.append(
+            f"notes {len(notes)}/{NOTES_CAPACITY} — "
+            f"review for redundant entries that can be merged"
+        )
+
+    # Text modules: warn on char limits
+    sp = modules.get("semantic_profile", "")
+    sp_len = len(sp) if sp != "[尚未建立档案]" else 0
+    if sp_len >= int(SEMANTIC_PROFILE_CHAR_LIMIT * COMPACTION_WARN_THRESHOLD):
+        hints.append(
+            f"semantic_profile {sp_len}/{SEMANTIC_PROFILE_CHAR_LIMIT} chars — "
+            f"consider condensing with <update>"
+        )
+
+    return hints
+
+
 def format_memory_load(memory: dict) -> str:
     user_id = memory.get("user_id", "default")
     session = memory.get("session", 0)
     modules = memory.get("modules", {})
     arch = memory.get("archive", {})
 
-    def wrap(tag: str, body: str) -> str:
-        return f"  <{tag}>\n{_ind(body)}\n  </{tag}>"
+    def wrap(tag: str, body: str, attrs: str = "") -> str:
+        attr_str = f" {attrs}" if attrs else ""
+        return f"  <{tag}{attr_str}>\n{_ind(body)}\n  </{tag}>"
+
+    # Capacity report
+    cap = compute_capacity_report(memory)
+
+    def cap_attr(module: str) -> str:
+        """Generate capacity attribute string for a module tag."""
+        c = cap.get(module, {})
+        if not c:
+            return ""
+        return f'usage="{c["used"]}/{c["capacity"]}" status="{c["status"]}"'
 
     # Notes
     notes_list = modules.get("notes", [])
@@ -836,17 +1007,17 @@ def format_memory_load(memory: dict) -> str:
     count = arch.get("entry_count", 0)
     parts = [
         f'<memory_load session="{session + 1}" previous_session="{session}" user_id="{user_id}">',
-        wrap("semantic_profile", modules.get("semantic_profile", "[尚未建立档案]")),
-        wrap("notes", notes_text),
+        wrap("semantic_profile", modules.get("semantic_profile", "[尚未建立档案]"), cap_attr("semantic_profile")),
+        wrap("notes", notes_text, cap_attr("notes")),
         wrap("relationship_map", modules.get(
             "relationship_map",
             "熟悉度: 陌生人\n信任度: 未知\n好感度: 无感\n互动基调: 待观察\n关键转折点: 无",
-        )),
-        wrap("episodic_memory", ep_text),
-        wrap("behavioral_memory", bm_text),
+        ), cap_attr("relationship_map")),
+        wrap("episodic_memory", ep_text, cap_attr("episodic_memory")),
+        wrap("behavioral_memory", bm_text, cap_attr("behavioral_memory")),
         wrap("emotional_sediment", modules.get(
             "emotional_sediment", "新的对话。新的人。保持距离，先观察。"
-        )),
+        ), cap_attr("emotional_sediment")),
     ]
     if count > 0 or summary:
         arch_body = summary if summary else f"归档记忆 {count} 条。"
@@ -856,6 +1027,15 @@ def format_memory_load(memory: dict) -> str:
             f'{_ind(arch_body)}\n'
             f'  </memory_archive>'
         )
+
+    # Compaction hints — only when modules are getting full
+    hints = generate_compaction_hints(memory)
+    if hints:
+        hints_body = "\n".join(f"• {h}" for h in hints)
+        parts.append(
+            f'  <compaction_hints>\n{_ind(hints_body)}\n  </compaction_hints>'
+        )
+
     parts.append("</memory_load>")
     return "\n".join(parts)
 

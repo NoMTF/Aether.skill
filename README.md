@@ -174,6 +174,34 @@ AI 记住事情不是"查数据库"，而是**自然地想起来**：
 
 </td>
 </tr>
+<tr>
+<td valign="top">
+
+### `07` 容量感知压缩
+
+每个模块标签带有实时容量指示：
+
+```xml
+<episodic_memory usage="32/40" status="WARN">
+```
+
+接近上限时自动生成 `<compaction_hints>`，引导 AI 主动合并/清理，**精准记忆优于海量堆积**。
+
+</td>
+<td valign="top">
+
+### `08` 记忆完整性防护
+
+所有写入操作自动扫描：
+
+- 注入攻击模式 (`ignore previous instructions`...)
+- 隐形 Unicode 字符 (零宽字符外泄)
+- API 密钥泄露模式
+
+可疑内容在后端层面静默拦截。
+
+</td>
+</tr>
 </table>
 
 <br>

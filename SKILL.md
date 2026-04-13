@@ -264,6 +264,41 @@ archive fuzzy entries automatically when episodic > 30.
 - `episodic_memory` hot tier: **≤ 40 entries** (backend archives fuzzy at 30+)
 - `behavioral_memory`: ≤ 25 entries
 - `notes`: ≤ 20 entries (review and merge when full — notes are permanent)
+- `semantic_profile`: ≤ 600 chars
+- `relationship_map`: ≤ 400 chars
+- `emotional_sediment`: ≤ 300 chars
+
+---
+
+### Capacity-Aware Compaction
+
+Each module tag in `<memory_load>` now includes `usage` and `status` attributes:
+
+```xml
+<episodic_memory usage="32/40" status="WARN">
+```
+
+Status levels: `OK` (< 75%), `WARN` (75–90%), `CRITICAL` (> 90%).
+
+When any module reaches WARN or above, a `<compaction_hints>` block appears
+at the end of `<memory_load>` with actionable suggestions:
+
+```xml
+<compaction_hints>
+  • episodic_memory 32/40 — consider <merge> or <forget> low-value entries: #e01, #e03, #e05
+  • notes 16/20 — review for redundant entries that can be merged
+</compaction_hints>
+```
+
+**When you see compaction hints:** proactively merge, forget, or condense
+entries in the same reply's `<mem_ops>`. Don't wait for overflow — a small
+amount of precise memory outperforms a large volume of unfiltered history.
+
+### Memory Integrity
+
+All `<write>`, `<update>`, and `<note>` operations are automatically scanned
+for injection patterns and invisible Unicode. Suspicious entries are blocked
+silently at the backend level.
 
 ---
 
